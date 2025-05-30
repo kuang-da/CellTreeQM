@@ -7,7 +7,7 @@ This repository contains the official implementation of CellTreeQM, our ICML 202
 > **Reconstructing Cell Lineage Trees from Phenotypic Features with Metric Learning**  
 > Da Kuang, Guanwen Qiu, Junhyong Kim  
 > 📄 [Read the paper](https://arxiv.org/abs/2503.13925)
-> 📖 [Project page]([CellTreeQM](https://kuang-da.github.io/CellTreeQM-page/))
+> 📖 [Project page](https://kuang-da.github.io/CellTreeQM-page/)
 
 ### Overview
 

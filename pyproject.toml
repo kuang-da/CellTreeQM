@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "celltreeqm"
+version = "0.1.0"
+authors = [
+  { name="Da Kuang", email="kuangda@seas.upenn.edu" },
+]
+description = "CellTreeQM: Quartet-based phylogenetic metric learning and reconstruction"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+  "numpy>=1.22",
+  "torch>=2.0",
+  "scipy>=1.10",
+  "biopython>=1.81",
+  "ete3>=3.1.3",
+  "tqdist>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/"
+
+[project.scripts]
+celltreeqm = "celltreeqm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+

@@ -1,0 +1,74 @@
+Metadata-Version: 2.4
+Name: celltreeqm
+Version: 0.1.0
+Summary: CellTreeQM: Quartet-based phylogenetic metric learning and reconstruction
+Author-email: Da Kuang <kuangda@seas.upenn.edu>
+License: MIT
+Project-URL: Homepage, https://github.com/
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.22
+Requires-Dist: torch>=2.0
+Requires-Dist: scipy>=1.10
+Requires-Dist: biopython>=1.81
+Requires-Dist: ete3>=3.1.3
+Requires-Dist: tqdist>=1.0
+
+CellTreeQM is a quartet-based metric learning toolkit for learning embeddings of cell lineages. It provides a PyTorch model (`CellTreeQMAttention`), quartet losses, and utilities to reconstruct trees from learned embeddings.
+
+## Install (dev)
+
+```bash
+pip install -e /workspaces/CellTreeQM
+# Optional (for datasets/loader):
+pip install -e /workspaces/CellTreeQM/CellTreeBench
+```
+
+Requirements (auto-installed via pip): torch, numpy, scipy, biopython, ete3, tqdist.
+
+## CLI
+
+After install, a `celltreeqm` command is available. Example training on the C. elegans split from CellTreeBench:
+
+```bash
+celltreeqm train \
+  --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_small \
+  --lineage P0 \
+  --device cuda:0
+```
+
+Artifacts (model and results) will be saved under `<bench-root>/examples/out/minimal_example_<dataset>_<lineage>/`.
+
+## Python API
+
+```python
+import torch
+from celltreeqm import CellTreeQMAttention, pairwise_distances
+
+model = CellTreeQMAttention(
+    input_dim=1000,
+    hidden_dim=1024,
+    num_heads=2,
+    num_layers=8,
+    output_dim=128,
+    norm_method="batch_norm",
+    proj_dim=1024,
+    gate_mode="none",
+)
+
+x = torch.randn(1, 64, 1000)  # (B, N, C)
+emb = model(x)
+dm = pairwise_distances(emb, metric="euclidean")
+```
+
+## Examples
+
+A full training example is in `CellTreeQM/examples/train_minimal_example.py` and now imports directly from the installed `celltreeqm` package.
+
+## Notes
+
+- The provided CLI assumes the CellTreeBench dataset layout. You can still use the Python API with your own matrices and reconstruction pipelines.
+- Ensure CUDA/tensors fit in memory for large inputs; reduce `--quartets` or `output_dim` as needed.
+
+

@@ -501,3 +501,69 @@ def test_unknown_reconstruct_eval(
         # Store result
         res_key = f"rf_emb_topo_test_unknown"
         res_dict[res_key][method].append(emb_topo_res["relative_rf"])
+
+
+def prune_dataset_to_leaves(dataset, keep_leaves):
+    """
+    Create a pruned copy of dataset containing only specified leaves.
+    
+    Args:
+        dataset: Dataset object with topology_tree, data_normalized, etc.
+        keep_leaves: List of leaf names to retain
+        
+    Returns:
+        Pruned dataset copy
+    """
+    import copy
+    from ete3 import Tree
+    
+    pruned = copy.deepcopy(dataset)
+    
+    # Prune the topology tree
+    pruned_tree = dataset.topology_tree.copy()
+    pruned_tree.prune(keep_leaves, preserve_branch_length=True)
+    pruned.topology_tree = pruned_tree
+    
+    # Update leaf names and count
+    pruned.leave_names = [leaf.name for leaf in pruned_tree.get_leaves()]
+    pruned.n_leaves = len(pruned.leave_names)
+    
+    # Prune the data matrices
+    if hasattr(pruned, 'data_normalized') and pruned.data_normalized is not None:
+        pruned.data_normalized = pruned.data_normalized.loc[pruned.leave_names]
+    if hasattr(pruned, 'data') and pruned.data is not None:
+        pruned.data = pruned.data.loc[pruned.leave_names]
+    
+    # Recompute reference distance matrix
+    from .utils import _get_path_distance_matrix
+    try:
+        pruned.ref_dm = _get_path_distance_matrix(pruned_tree, pruned.leave_names)
+    except:
+        # Fallback: recompute using tree distances
+        import torch
+        n = len(pruned.leave_names)
+        ref_dm = torch.zeros(n, n)
+        leaves = list(pruned_tree.get_leaves())
+        for i in range(n):
+            for j in range(i+1, n):
+                dist = leaves[i].get_distance(leaves[j])
+                ref_dm[i, j] = dist
+                ref_dm[j, i] = dist
+        pruned.ref_dm = ref_dm
+    
+    return pruned
+
+
+def _get_path_distance_matrix(tree, leaf_names):
+    """Compute path distance matrix from tree."""
+    import torch
+    n = len(leaf_names)
+    dm = torch.zeros(n, n)
+    leaves = {leaf.name: leaf for leaf in tree.get_leaves()}
+    
+    for i, name_i in enumerate(leaf_names):
+        for j, name_j in enumerate(leaf_names):
+            if i != j:
+                dm[i, j] = leaves[name_i].get_distance(leaves[name_j])
+    
+    return dm

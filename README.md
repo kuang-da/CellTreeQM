@@ -51,9 +51,13 @@ If you find CellTreeQM useful, please cite our paper:
 ### ⚙️ Installation (Development)
 
 ```bash
-pip install -e /workspaces/CellTreeQM
+pip install -e /workspaces/CellTreeQM/CellTreeQM
 # Optional: dataset utilities
 pip install -e /workspaces/CellTreeQM/CellTreeBench
+# Add /home/kuangda/.local/bin to your PATH
+export PATH="/home/kuangda/.local/bin:$PATH"
+# Or add to ~/.bashrc
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 ```
 
 **Dependencies (auto-installed via pip):**  
@@ -67,18 +71,32 @@ After installation, a `celltreeqm` command becomes available.
 For example, training on the *C. elegans* dataset from **CellTreeBench**:
 
 ```bash
+# Dataset artifacts live under bench-root; experiment outputs are independent
+export CELLTREEQM_OUTPUT_DIR=/workspaces/CellTreeQM/CellTreeQM-notes/bench-root/examples/out
+
 celltreeqm train \
   --bench-root /workspaces/CellTreeQM/CellTreeBench \
   --dataset celegans_small \
   --lineage P0 \
-  --device cuda:0
+  --device cuda:0 \
+  --steps-per-epoch 300 \
+  --eval-interval 50 \
+  --eval-quartets-cap 100000 \
+  --recon-method nj
 ```
 
-Training artifacts (model + results) are saved under:
+Training artifacts and dataset-level reusable artifacts are saved to distinct locations:
 
-```
-<bench-root>/examples/out/minimal_example_<dataset>_<lineage>/
-```
+- Experiment outputs (models, results):
+  - Default: `$CELLTREEQM_OUTPUT_DIR/<run_name>/` if env var is set; otherwise `./celltreeqm-outputs/<run_name>/`
+  - Override with: `--output-dir <path>` → `<path>/<run_name>/`
+- Dataset artifacts (tree ascii/pickle, filtered gene list, cached known quartets for HLP):
+  - Default: `<bench-root>/data/<dataset>/<lineage>/artifacts/`
+  - Override with: `--dataset-artifacts-dir <path>`
+
+Key files:
+- Experiment: `best_model.pth`, `results.json`, `metrics/`, `logs/`, `(PLL) pll_datasets.pt`
+- Dataset: `topology_tree-ncells.txt`, `topology_tree.pickle`, `gene_list.pkl`, `quartets/level-<L>/*.pt`, `exprs_df_cache.pkl`
 
 ---
 

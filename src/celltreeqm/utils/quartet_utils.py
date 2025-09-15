@@ -172,3 +172,285 @@ def quartet_dict_to_tensors(quartet_dict):
     codes_tensor = torch.tensor(quartet_codes, dtype=torch.int)  # (n_quartets,)
 
     return quartets_tensor, codes_tensor 
+
+
+def generate_quartets_from_level(tree, level, clade_relations="known"):
+    """
+    Generate quartets from tree clades at specified level.
+    This is the core function from research codebase.
+    
+    Args:
+        tree: ete3 Tree object
+        level: int, level in tree hierarchy 
+        clade_relations: str, "known" or "unknown"
+    
+    Returns:
+        dict: quartet_dict with (i,j,k,l) -> code mapping
+    """
+    import logging
+    import math
+    from itertools import combinations
+    from ete3 import Tree
+    import numpy as np
+    
+    # Collect leaf names and map to indices
+    leaf_names = [leaf.name for leaf in tree.get_leaves()]
+    n_leaves = len(leaf_names)
+    name_to_idx = {nm: i for i, nm in enumerate(leaf_names)}
+    
+    # Get clades at specified level
+    clade_roots = _collect_clades_at_level(tree, level)
+    clade_info = _get_clade_list_and_roots(clade_roots, name_to_idx)
+    
+    logging.info(f"Found {len(clade_info)} clades at level={level}")
+    
+    # Generate 2+2 quartets between clades
+    quartets_2by2 = _generate_between_clade_quartets(clade_info)
+    
+    # Generate 1+1+1+1 quartets if enough clades and relations known
+    quartets_1each = {}
+    if clade_relations == "known" and len(clade_info) >= 4:
+        clade_dist_mat = _compute_clade_distance_by_root(clade_info)
+        quartets_1each = _generate_one_leaf_per_clade_quartets(clade_info, clade_dist_mat)
+    
+    # Generate 2+1+1 quartets
+    quartets_2by1by1 = {}
+    if len(clade_info) >= 3:
+        quartets_2by1by1 = _generate_two_plus_one_plus_one_quartets(clade_info)
+    
+    # Combine all quartets
+    total_quartets = {**quartets_2by2, **quartets_1each, **quartets_2by1by1}
+    
+    logging.info(f"Generated {len(quartets_2by2)} 2+2, {len(quartets_1each)} 1+1+1+1, {len(quartets_2by1by1)} 2+1+1 quartets")
+    logging.info(f"Total known quartets: {len(total_quartets)}")
+    
+    return total_quartets
+
+
+def _collect_clades_at_level(root_node, target_level=1, current_level=0):
+    """Collect clade roots at specified level."""
+    clade_roots = []
+    if current_level == target_level:
+        clade_roots.append(root_node)
+    else:
+        for child in root_node.children:
+            clade_roots.extend(_collect_clades_at_level(child, target_level, current_level + 1))
+    return clade_roots
+
+
+def _get_clade_list_and_roots(clade_roots, name_to_idx):
+    """Convert clade roots to (leaf_indices, root_node) tuples."""
+    clade_info = []
+    for croot in clade_roots:
+        leaf_names = croot.get_leaf_names()
+        leaf_indices = [name_to_idx[nm] for nm in leaf_names]
+        clade_info.append((leaf_indices, croot))
+    return clade_info
+
+
+def _generate_between_clade_quartets(clade_info):
+    """Generate 2+2 quartets between pairs of clades."""
+    from itertools import combinations
+    quartet_dict = {}
+    n_clades = len(clade_info)
+    
+    for c1_idx in range(n_clades):
+        for c2_idx in range(c1_idx + 1, n_clades):
+            leafset1, _ = clade_info[c1_idx]
+            leafset2, _ = clade_info[c2_idx]
+            
+            for i, j in combinations(leafset1, 2):
+                for k, l in combinations(leafset2, 2):
+                    quartet_key = tuple(sorted((i, j, k, l)))
+                    quartet_dict[quartet_key] = 0  # code=0 => (i,j)-(k,l)
+    
+    return quartet_dict
+
+
+def _compute_clade_distance_by_root(clade_info):
+    """Compute distance matrix between clade roots."""
+    import numpy as np
+    n_clades = len(clade_info)
+    distmat = np.zeros((n_clades, n_clades))
+    
+    for i in range(n_clades):
+        for j in range(i + 1, n_clades):
+            _, root_i = clade_info[i]
+            _, root_j = clade_info[j]
+            d = root_i.get_distance(root_j)
+            distmat[i][j] = d
+            distmat[j][i] = d
+    
+    return distmat
+
+
+def _generate_one_leaf_per_clade_quartets(clade_info, clade_dist):
+    """Generate 1+1+1+1 quartets using root distances."""
+    from itertools import combinations
+    quartet_dict = {}
+    n_clades = len(clade_info)
+    
+    for c1, c2, c3, c4 in combinations(range(n_clades), 4):
+        # Compute partition code from root distances
+        d_c1c2 = clade_dist[c1][c2]
+        d_c3c4 = clade_dist[c3][c4]
+        d_c1c3 = clade_dist[c1][c3]
+        d_c2c4 = clade_dist[c2][c4]
+        d_c1c4 = clade_dist[c1][c4]
+        d_c2c3 = clade_dist[c2][c3]
+        
+        S1 = d_c1c2 + d_c3c4  # code=0
+        S2 = d_c1c3 + d_c2c4  # code=1
+        S3 = d_c1c4 + d_c2c3  # code=2
+        sums = [S1, S2, S3]
+        best_code = sums.index(min(sums))
+        
+        # Generate all combinations
+        leafset1, _ = clade_info[c1]
+        leafset2, _ = clade_info[c2]
+        leafset3, _ = clade_info[c3]
+        leafset4, _ = clade_info[c4]
+        
+        for a in leafset1:
+            for b in leafset2:
+                for c in leafset3:
+                    for d in leafset4:
+                        quartet_key = tuple(sorted((a, b, c, d)))
+                        quartet_dict[quartet_key] = best_code
+    
+    return quartet_dict
+
+
+def _generate_two_plus_one_plus_one_quartets(clade_info):
+    """Generate 2+1+1 quartets."""
+    from itertools import combinations
+    quartet_dict = {}
+    n_clades = len(clade_info)
+    
+    for c1, c2, c3 in combinations(range(n_clades), 3):
+        def _gen_2plus1plus1(singled, otherA, otherB):
+            singled_leafset, _ = clade_info[singled]
+            leafsetA, _ = clade_info[otherA]
+            leafsetB, _ = clade_info[otherB]
+            for i, j in combinations(singled_leafset, 2):
+                for k in leafsetA:
+                    for l in leafsetB:
+                        quartet_key = tuple(sorted((i, j, k, l)))
+                        quartet_dict[quartet_key] = 0
+        
+        _gen_2plus1plus1(c1, c2, c3)
+        _gen_2plus1plus1(c2, c1, c3)
+        _gen_2plus1plus1(c3, c1, c2)
+    
+    return quartet_dict
+
+
+def generate_all_quartets(tree):
+    """
+    Generate all quartets from a tree using 4-point condition.
+    This matches the research codebase implementation.
+    
+    Args:
+        tree: ete3 Tree object
+        
+    Returns:
+        dict: quartet_dict with (i,j,k,l) -> code mapping for ALL quartets
+    """
+    import logging
+    import time
+    import numpy as np
+    from itertools import combinations
+    from multiprocessing import Pool, cpu_count
+    
+    start_time = time.time()
+    
+    # Collect leaves and create distance matrix
+    leaves = tree.get_leaves()
+    n_leaves = len(leaves)
+    if n_leaves < 4:
+        return {}
+    
+    logging.info(f"Generating all quartets for {n_leaves} leaves...")
+    
+    # Precompute pairwise distances
+    distmat = np.zeros((n_leaves, n_leaves))
+    for i in range(n_leaves):
+        for j in range(i + 1, n_leaves):
+            d = leaves[i].get_distance(leaves[j])
+            distmat[i][j] = d
+            distmat[j][i] = d
+    
+    # Generate all 4-combinations and compute codes
+    all_combinations = list(combinations(range(n_leaves), 4))
+    n_quartets = len(all_combinations)
+    
+    # Use parallel processing for large datasets
+    n_processes = min(cpu_count(), 8)
+    chunk_size = max(1, n_quartets // (n_processes * 10))
+    chunks = [all_combinations[i:i + chunk_size] for i in range(0, n_quartets, chunk_size)]
+    
+    args_list = [(chunk, distmat) for chunk in chunks]
+    
+    quartet_dict = {}
+    with Pool(n_processes) as pool:
+        results = pool.map(_process_quartet_batch, args_list)
+        for batch_dict in results:
+            quartet_dict.update(batch_dict)
+    
+    elapsed = time.time() - start_time
+    logging.info(f"Generated {len(quartet_dict)} quartets in {elapsed:.2f}s")
+    
+    return quartet_dict
+
+
+def _process_quartet_batch(args):
+    """Helper for parallel quartet processing."""
+    quartet_indices, distmat = args
+    batch_dict = {}
+    
+    for i, j, k, l in quartet_indices:
+        # 4-point condition
+        S1 = distmat[i][j] + distmat[k][l]  # code=0
+        S2 = distmat[i][k] + distmat[j][l]  # code=1  
+        S3 = distmat[i][l] + distmat[j][k]  # code=2
+        sums = [S1, S2, S3]
+        best_code = sums.index(min(sums))
+        
+        quartet_key = tuple(sorted((i, j, k, l)))
+        batch_dict[quartet_key] = best_code
+    
+    return batch_dict
+
+
+def generate_quartets_tensor_with_ref(batch_size, dm, quartets_tensor, ref_quartets_tensor, device):
+    """
+    Sample quartets from pre-defined indices and return learned dm quartets and provided ref quartets.
+
+    Args:
+      batch_size: number of quartets to sample (-1 or >= n selects all)
+      dm: (B,N,N) or (N,N) tensor of distances (learned)
+      quartets_tensor: (Q,4) long
+      ref_quartets_tensor: (Q,4,4) float
+      device: torch.device
+    Returns:
+      dm_quartets: (Bq,4,4)
+      dm_ref_quartets: (Bq,4,4)
+    """
+    import torch
+
+    if dm.dim() == 3 and dm.size(0) == 1:
+        dm = dm.squeeze(0)
+
+    Q = quartets_tensor.size(0)
+    if batch_size == -1 or batch_size >= Q:
+        sel_idx = torch.arange(Q, device=device)
+    else:
+        sel_idx = torch.randperm(Q, device=device)[:batch_size]
+
+    sel_quartets = quartets_tensor.to(device)[sel_idx]
+    sel_ref = ref_quartets_tensor.to(device)[sel_idx]
+
+    idx_rows = sel_quartets.unsqueeze(2).expand(-1, -1, 4)
+    idx_cols = sel_quartets.unsqueeze(1).expand(-1, 4, -1)
+    dm_quartets = dm[idx_rows, idx_cols]
+    return dm_quartets, sel_ref

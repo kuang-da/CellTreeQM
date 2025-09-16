@@ -18,6 +18,8 @@ from .losses.loss import (
     quadruplet_loss_quartet_tensor_vectorized,
 )
 
+from .trainer import TrainConfig, TrainInputs, TrainResult, train
+
 __all__ = [
     "CellTreeQMAttention",
     "pairwise_distances",
@@ -32,6 +34,10 @@ __all__ = [
     "additivity_error_quartet_tensor",
     "triplet_loss_quartet_tensor_vectorized",
     "quadruplet_loss_quartet_tensor_vectorized",
+    "TrainConfig",
+    "TrainInputs",
+    "TrainResult",
+    "train",
 ]
 
 

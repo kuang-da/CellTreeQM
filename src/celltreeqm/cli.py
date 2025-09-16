@@ -5,17 +5,8 @@ import time
 import torch
 import torch.optim as optim
 
-from . import (
-    CellTreeQMAttention,
-    pairwise_distances,
-    distance_error,
-    generate_quartets_tensor,
-    additivity_error_quartet_tensor,
-    triplet_loss_quartet_tensor_vectorized,
-    quadruplet_loss_quartet_tensor_vectorized,
-    check_embedding,
-    reconstruct_from_dm,
-)
+from . import CellTreeQMAttention
+from .trainer import TrainConfig, TrainInputs, train as trainer_train
 from .utils.utils import prune_dataset_to_leaves
 from .utils.quartet_utils import (
     get_quartet_dist,
@@ -124,323 +115,94 @@ def cmd_train(args: argparse.Namespace) -> None:
         device=str(device),
     ).to(device)
 
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # Prepare optional HLP known quartets (cache/load under dataset artifacts)
+    hlp_quartets = None
+    if args.setting == "high_level_partition":
+        qk_dir = os.path.join(dataset_artifacts_dir, "quartets", f"level-{args.prior_level}")
+        os.makedirs(qk_dir, exist_ok=True)
+        qk_tensor_path = os.path.join(qk_dir, "quartets_known_tensor.pt")
+        qk_codes_path = os.path.join(qk_dir, "quartets_known_codes_tensor.pt")
+        if os.path.exists(qk_tensor_path) and os.path.exists(qk_codes_path):
+            logging.info(f"Loading cached known quartets from {qk_dir} (level={args.prior_level})")
+            qk_tensor = torch.load(qk_tensor_path, map_location=device)
+            qk_codes = torch.load(qk_codes_path, map_location=device)
+        else:
+            # Sampled or full known quartets depending on cap
+            from .utils.quartet_utils import generate_quartets_from_level_sampled
+            tree = train_dataset.topology_tree
+            if args.known_quartets_cap and args.known_quartets_cap > 0:
+                logging.info(
+                    f"Generating sampled known quartets (cap={args.known_quartets_cap}) from level {args.prior_level} and caching to {qk_dir}"
+                )
+                quartet_dict_known = generate_quartets_from_level_sampled(tree, args.prior_level, args.known_quartets_cap, seed=args.seed)
+            else:
+                logging.info(f"Generating all known quartets from tree level {args.prior_level} and caching to {qk_dir}")
+                quartet_dict_known = generate_quartets_from_level(tree, args.prior_level, "known")
+            qk_tensor, qk_codes = quartet_dict_to_tensors(quartet_dict_known)
+            torch.save(qk_tensor, qk_tensor_path)
+            torch.save(qk_codes, qk_codes_path)
+        hlp_quartets = (qk_tensor, qk_codes)
 
-    node_mtx_dict = train_dataset.get_node_mtx()
-    pts_mtx = (
-        torch.tensor(node_mtx_dict["node_mtx"], dtype=torch.float).unsqueeze(0).to(device)
+    # Build trainer inputs/config and delegate
+    inputs = TrainInputs(
+        setting=args.setting,
+        train_dataset=train_dataset,
+        test_dataset=test_dataset,
+        hlp_quartets=hlp_quartets,
+        pll_known_leaves=(known_leaves if args.setting == "partially_labeled_leaves" else None),
+        pll_unknown_leaves=(unknown_leaves if args.setting == "partially_labeled_leaves" else None),
     )
-    dm_ref = train_dataset.ref_dm.unsqueeze(0).to(device)
 
-    best_rf = float("inf")
-    training_seed = args.dm_quartet_seed if args.dm_quartet_seed is not None else args.seed
-    for epoch in range(args.epochs):
-        model.train()
-        # Control the number of steps explicitly for scalability
-        max_step = max(1, args.steps_per_epoch)
-        for step in range(max_step):
-            optimizer.zero_grad()
-            trans_pts_mtx = model(pts_mtx)
-            dm = pairwise_distances(trans_pts_mtx, metric=args.metric).to(device)
-            if args.setting == "high_level_partition":
-                # Generate or load known quartets derived from tree level; cache under dataset artifacts
-                if step == 0 and epoch == 0:
-                    qk_dir = os.path.join(
-                        dataset_artifacts_dir, "quartets", f"level-{args.prior_level}"
-                    )
-                    os.makedirs(qk_dir, exist_ok=True)
-                    qk_tensor_path = os.path.join(qk_dir, "quartets_known_tensor.pt")
-                    qk_codes_path = os.path.join(qk_dir, "quartets_known_codes_tensor.pt")
+    cfg = TrainConfig(
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        epochs=args.epochs,
+        steps_per_epoch=args.steps_per_epoch,
+        quartets_per_step=args.quartets,
+        metric=args.metric,
+        metric_loss=args.metric_loss,
+        weight_D=args.weight_D,
+        weight_P=args.weight_P,
+        weight_close=args.weight_close,
+        weight_push=args.weight_push,
+        margin=args.margin,
+        eval_interval=args.eval_interval,
+        eval_quartets_cap=args.eval_quartets_cap,
+        dm_quartet_seed=args.dm_quartet_seed,
+        seed=args.seed,
+        recon_method=args.recon_method,
+        device=str(device),
+    )
 
-                    if os.path.exists(qk_tensor_path) and os.path.exists(qk_codes_path):
-                        logging.info(
-                            f"Loading cached known quartets from {qk_dir} (level={args.prior_level})"
-                        )
-                        qk_tensor = torch.load(qk_tensor_path, map_location=device)
-                        qk_codes = torch.load(qk_codes_path, map_location=device)
-                    else:
-                        logging.info(
-                            f"Generating known quartets from tree level {args.prior_level} and caching to {qk_dir}"
-                        )
-                        tree = train_dataset.topology_tree
-                        quartet_dict_known = generate_quartets_from_level(
-                            tree, args.prior_level, "known"
-                        )
-                        qk_tensor, qk_codes = quartet_dict_to_tensors(quartet_dict_known)
-                        torch.save(qk_tensor, qk_tensor_path)
-                        torch.save(qk_codes, qk_codes_path)
-
-                    cli_cached = {"qk_tensor": qk_tensor, "qk_codes": qk_codes}
-
-                if "cli_cached" in locals():
-                    dm_quartets, dm_ref_quartets = generate_quartets_tensor_from_tensor_vectorized(
-                        batch_size=args.quartets,
-                        dm=dm,
-                        quartets_tensor=cli_cached["qk_tensor"],
-                        codes_tensor=cli_cached["qk_codes"],
-                        device=device,
-                    )
-                else:
-                    dm_quartets, dm_ref_quartets = generate_quartets_tensor(
-                        batch_size=args.quartets, dm=dm, dm_ref=dm_ref, device=device
-                    )
-            else:
-                dm_quartets, dm_ref_quartets = generate_quartets_tensor(
-                    batch_size=args.quartets, dm=dm, dm_ref=dm_ref, device=device, seed=training_seed
-                )
-
-            if args.metric_loss == "additivity":
-                loss_P, _, _, _ = additivity_error_quartet_tensor(
-                    dm_quartets, dm_ref_quartets, args.weight_close, args.weight_push, args.margin, device=device
-                )
-            elif args.metric_loss == "triplet":
-                loss_P = triplet_loss_quartet_tensor_vectorized(
-                    dm_quartets, dm_ref_quartets, margin=args.margin, device=device
-                )
-            else:
-                loss_P, *_ = quadruplet_loss_quartet_tensor_vectorized(
-                    dm_quartets, dm_ref_quartets, alpha=0.5, beta=0.5, device=device
-                )
-
-            loss_D = distance_error(pts_mtx, trans_pts_mtx, diff_norm="fro", dist_metric=args.metric)
-            total_loss = args.weight_D * loss_D + args.weight_P * loss_P
-            total_loss.backward()
-            optimizer.step()
-
-            # Periodic lightweight train evaluation (train RF)
-            if step % max(1, args.eval_interval) == 0:
-                with torch.no_grad():
-                    _, emb_dm_tmp, node_names_tmp = check_embedding(train_dataset, model, args.metric, device)
-                    emb_tree_tmp = reconstruct_from_dm(emb_dm_tmp, node_names_tmp, method=args.recon_method)
-                    rf_train_tmp = train_dataset.compare_trees(emb_tree_tmp, ref_tree="topology_tree")["relative_rf"]
-                    logging.info(
-                        f"[Epoch {epoch+1}/{args.epochs} | Step {step}/{max_step}] train RF={rf_train_tmp:.4f} loss={total_loss.item():.4f}"
-                    )
-
-        logging.info(f"Epoch {epoch+1}/{args.epochs} - loss={total_loss.item():.4f}")
-
-    # Save model
-    torch.save(model.state_dict(), os.path.join(out_dir, "best_model.pth"))
+    result = trainer_train(model, inputs, cfg, out_dir)
     logging.info(f"Saved model to {out_dir}")
 
-    # Evaluate on train/test and save results.json
+    # Append run metadata to results.json
     import json
-    model.eval()
-    with torch.no_grad():
-        # Train metrics
-        _, emb_dm_train, node_names_train = check_embedding(train_dataset, model, args.metric, device)
-        emb_tree_train = reconstruct_from_dm(emb_dm_train, node_names_train, method=args.recon_method)
-        rf_train = train_dataset.compare_trees(emb_tree_train, ref_tree="topology_tree")["relative_rf"]
-
-        # Test metrics
-        _, emb_dm_test, node_names_test = check_embedding(test_dataset, model, args.metric, device)
-        emb_tree_test = reconstruct_from_dm(emb_dm_test, node_names_test, method=args.recon_method)
-        rf_test = test_dataset.compare_trees(emb_tree_test, ref_tree="topology_tree")["relative_rf"]
-
-        # Quartet distance evaluation
-        pts_mtx_test = (
-            torch.tensor(test_dataset.get_node_mtx()["node_mtx"], dtype=torch.float).unsqueeze(0).to(device)
-        )
-        dm_test = pairwise_distances(model(pts_mtx_test), metric=args.metric).to(device)
-        dm_test = dm_test.squeeze(0)  # (N,N)
-        dm_ref_test = test_dataset.ref_dm
-        if not isinstance(dm_ref_test, torch.Tensor):
-            dm_ref_test = torch.tensor(dm_ref_test, dtype=torch.float32)
-        dm_ref_test = dm_ref_test.to(device)
-        
-        metrics = {
-            "rf_train": rf_train,
-            "rf_test": rf_test,
-        }
-        
-        if args.setting == "high_level_partition":
-            # Load cached known quartets from dataset artifacts and evaluate known/unknown separately
-            qk_dir = os.path.join(
-                dataset_artifacts_dir, "quartets", f"level-{args.prior_level}"
-            )
-            qk_tensor_path = os.path.join(qk_dir, "quartets_known_tensor.pt")
-            qk_codes_path = os.path.join(qk_dir, "quartets_known_codes_tensor.pt")
-            if os.path.exists(qk_tensor_path) and os.path.exists(qk_codes_path):
-                qk_tensor = torch.load(qk_tensor_path, map_location=device)
-                qk_codes = torch.load(qk_codes_path, map_location=device)
-                
-                # Generate all quartets and separate known/unknown
-                logging.info("Generating all quartets for evaluation...")
-                quartet_dict_all = generate_all_quartets(test_dataset.topology_tree)
-                known_quartets_set = set()
-                for i in range(qk_tensor.size(0)):
-                    quartet_key = tuple(sorted(qk_tensor[i].tolist()))
-                    known_quartets_set.add(quartet_key)
-                
-                quartet_dict_unknown = {q: code for q, code in quartet_dict_all.items() if q not in known_quartets_set}
-                
-                # Convert to tensors
-                qu_tensor, qu_codes = quartet_dict_to_tensors(quartet_dict_unknown)
-                qa_tensor, qa_codes = quartet_dict_to_tensors(quartet_dict_all)
-                
-                # Cap evaluation quartets; -1 means all
-                eval_bs = args.eval_quartets_cap if args.eval_quartets_cap > 0 else -1
-                if eval_bs > 0 and args.dm_quartet_seed is not None:
-                    torch.manual_seed(args.dm_quartet_seed)
-
-                # Evaluate known quartets
-                sel_k = qk_tensor if eval_bs == -1 or eval_bs >= qk_tensor.size(0) else qk_tensor[torch.randperm(qk_tensor.size(0), device=device)[:eval_bs]]
-                idx_rows = sel_k.unsqueeze(2).expand(-1, -1, 4)
-                idx_cols = sel_k.unsqueeze(1).expand(-1, 4, -1)
-                dm_quartets_known = dm_test[idx_rows, idx_cols]
-                dm_ref_quartets_known = dm_ref_test[idx_rows, idx_cols]
-                quartet_dist_known = get_quartet_dist(dm_quartets_known, dm_ref_quartets_known).item()
-                
-                # Evaluate unknown quartets
-                sel_u = qu_tensor if eval_bs == -1 or eval_bs >= qu_tensor.size(0) else qu_tensor[torch.randperm(qu_tensor.size(0), device=device)[:eval_bs]]
-                idx_rows = sel_u.unsqueeze(2).expand(-1, -1, 4)
-                idx_cols = sel_u.unsqueeze(1).expand(-1, 4, -1)
-                dm_quartets_unknown = dm_test[idx_rows, idx_cols]
-                dm_ref_quartets_unknown = dm_ref_test[idx_rows, idx_cols]
-                quartet_dist_unknown = get_quartet_dist(dm_quartets_unknown, dm_ref_quartets_unknown).item()
-                
-                # Evaluate all quartets
-                sel_a = qa_tensor if eval_bs == -1 or eval_bs >= qa_tensor.size(0) else qa_tensor[torch.randperm(qa_tensor.size(0), device=device)[:eval_bs]]
-                idx_rows = sel_a.unsqueeze(2).expand(-1, -1, 4)
-                idx_cols = sel_a.unsqueeze(1).expand(-1, 4, -1)
-                dm_quartets_all = dm_test[idx_rows, idx_cols]
-                dm_ref_quartets_all = dm_ref_test[idx_rows, idx_cols]
-                quartet_dist_all = get_quartet_dist(dm_quartets_all, dm_ref_quartets_all).item()
-                
-                metrics.update({
-                    "quartet_dist_all": quartet_dist_all,
-                    "quartet_dist_known": quartet_dist_known,
-                    "quartet_dist_unknown": quartet_dist_unknown,
-                })
-                
-                logging.info(f"Quartet distances - All: {quartet_dist_all:.4f}, Known: {quartet_dist_known:.4f}, Unknown: {quartet_dist_unknown:.4f}")
-            else:
-                logging.warning("Known quartets not found, using standard evaluation")
-                dm_quartets, dm_ref_quartets = generate_quartets_tensor(batch_size=min(100000, 4096), dm=dm_test, dm_ref=dm_ref_test, device=device)
-                quartet_dist_test = get_quartet_dist(dm_quartets, dm_ref_quartets).item()
-                metrics["quartet_dist_test"] = quartet_dist_test
-                
-        elif args.setting == "partially_labeled_leaves":
-            # Load cached datasets and evaluate known/partial/unknown quartets
-            if os.path.exists(os.path.join(out_dir, "pll_datasets.pt")):
-                pll_data = torch.load(os.path.join(out_dir, "pll_datasets.pt"), map_location="cpu", weights_only=False)
-                known_leaves = pll_data["known_leaves"]
-                unknown_leaves = pll_data["unknown_leaves"]
-                # Reconstruct unknown dataset on the fly to avoid unpickling complex objects
-                test_unknown_dataset = prune_dataset_to_leaves(test_dataset, unknown_leaves)
-                
-                # Generate all quartets from full test dataset
-                logging.info("Generating all quartets for partially_labeled_leaves evaluation...")
-                quartet_dict_all = generate_all_quartets(test_dataset.topology_tree)
-                
-                # Classify quartets as known/partial/unknown based on leaf membership
-                leaf_name_to_index = {name: i for i, name in enumerate(test_dataset.leave_names)}
-                known_set = set(known_leaves)
-                
-                quartet_dict_known = {}
-                quartet_dict_partial = {}
-                quartet_dict_unknown = {}
-                
-                for quartet_tuple, code in quartet_dict_all.items():
-                    leaf_names_in_q = [test_dataset.leave_names[idx] for idx in quartet_tuple]
-                    known_count = sum(1 for name in leaf_names_in_q if name in known_set)
-                    
-                    if known_count == 4:
-                        quartet_dict_known[quartet_tuple] = code
-                    elif known_count == 0:
-                        quartet_dict_unknown[quartet_tuple] = code
-                    else:
-                        quartet_dict_partial[quartet_tuple] = code
-                
-                logging.info(f"Quartet classification - Known: {len(quartet_dict_known)}, Partial: {len(quartet_dict_partial)}, Unknown: {len(quartet_dict_unknown)}")
-                
-                # Convert to tensors and evaluate each category
-                qa_tensor, qa_codes = quartet_dict_to_tensors(quartet_dict_all)
-                qk_tensor, qk_codes = quartet_dict_to_tensors(quartet_dict_known)
-                qp_tensor, qp_codes = quartet_dict_to_tensors(quartet_dict_partial)
-                qu_tensor, qu_codes = quartet_dict_to_tensors(quartet_dict_unknown)
-                
-                eval_bs = args.eval_quartets_cap if args.eval_quartets_cap > 0 else -1
-                if eval_bs > 0 and args.dm_quartet_seed is not None:
-                    torch.manual_seed(args.dm_quartet_seed)
-
-                # Evaluate all
-                sel_a = qa_tensor if eval_bs == -1 or eval_bs >= qa_tensor.size(0) else qa_tensor[torch.randperm(qa_tensor.size(0), device=device)[:eval_bs]]
-                idx_rows = sel_a.unsqueeze(2).expand(-1, -1, 4)
-                idx_cols = sel_a.unsqueeze(1).expand(-1, 4, -1)
-                dm_quartets_all = dm_test[idx_rows, idx_cols]
-                dm_ref_quartets_all = dm_ref_test[idx_rows, idx_cols]
-                quartet_dist_all = get_quartet_dist(dm_quartets_all, dm_ref_quartets_all).item()
-                
-                # Evaluate known
-                sel_k = qk_tensor if eval_bs == -1 or eval_bs >= qk_tensor.size(0) else qk_tensor[torch.randperm(qk_tensor.size(0), device=device)[:eval_bs]]
-                idx_rows = sel_k.unsqueeze(2).expand(-1, -1, 4)
-                idx_cols = sel_k.unsqueeze(1).expand(-1, 4, -1)
-                dm_quartets_known = dm_test[idx_rows, idx_cols]
-                dm_ref_quartets_known = dm_ref_test[idx_rows, idx_cols]
-                quartet_dist_known = get_quartet_dist(dm_quartets_known, dm_ref_quartets_known).item()
-                
-                # Evaluate partial
-                sel_p = qp_tensor if eval_bs == -1 or eval_bs >= qp_tensor.size(0) else qp_tensor[torch.randperm(qp_tensor.size(0), device=device)[:eval_bs]]
-                idx_rows = sel_p.unsqueeze(2).expand(-1, -1, 4)
-                idx_cols = sel_p.unsqueeze(1).expand(-1, 4, -1)
-                dm_quartets_partial = dm_test[idx_rows, idx_cols]
-                dm_ref_quartets_partial = dm_ref_test[idx_rows, idx_cols]
-                quartet_dist_partial = get_quartet_dist(dm_quartets_partial, dm_ref_quartets_partial).item()
-                
-                # Evaluate unknown
-                sel_u = qu_tensor if eval_bs == -1 or eval_bs >= qu_tensor.size(0) else qu_tensor[torch.randperm(qu_tensor.size(0), device=device)[:eval_bs]]
-                idx_rows = sel_u.unsqueeze(2).expand(-1, -1, 4)
-                idx_cols = sel_u.unsqueeze(1).expand(-1, 4, -1)
-                dm_quartets_unknown = dm_test[idx_rows, idx_cols]
-                dm_ref_quartets_unknown = dm_ref_test[idx_rows, idx_cols]
-                quartet_dist_unknown = get_quartet_dist(dm_quartets_unknown, dm_ref_quartets_unknown).item()
-                
-                # Evaluate on test_unknown dataset (RF)
-                _, emb_dm_unknown, node_names_unknown = check_embedding(test_unknown_dataset, model, args.metric, device)
-                emb_tree_unknown = reconstruct_from_dm(emb_dm_unknown, node_names_unknown, method=args.recon_method)
-                rf_test_unknown = test_unknown_dataset.compare_trees(emb_tree_unknown, ref_tree="topology_tree")["relative_rf"]
-                
-                metrics.update({
-                    "quartet_dist_all": quartet_dist_all,
-                    "quartet_dist_known": quartet_dist_known,
-                    "quartet_dist_partial": quartet_dist_partial,
-                    "quartet_dist_unknown": quartet_dist_unknown,
-                    "rf_test_unknown": rf_test_unknown,
-                })
-                
-                logging.info(f"Quartet distances - All: {quartet_dist_all:.4f}, Known: {quartet_dist_known:.4f}, Partial: {quartet_dist_partial:.4f}, Unknown: {quartet_dist_unknown:.4f}")
-                logging.info(f"RF test_unknown: {rf_test_unknown:.4f}")
-            else:
-                logging.warning("PLL datasets not found, using standard evaluation")
-                dm_quartets, dm_ref_quartets = generate_quartets_tensor(batch_size=min(100000, 4096), dm=dm_test, dm_ref=dm_ref_test, device=device)
-                quartet_dist_test = get_quartet_dist(dm_quartets, dm_ref_quartets).item()
-                metrics["quartet_dist_test"] = quartet_dist_test
-                
-        else:
-            # Standard evaluation for fully_supervised
-            eval_bs = args.eval_quartets_cap if args.eval_quartets_cap > 0 else -1
-            dm_quartets, dm_ref_quartets = generate_quartets_tensor(
-                batch_size=eval_bs if eval_bs != -1 else 100000,
-                dm=dm_test,
-                dm_ref=dm_ref_test,
-                device=device,
-                seed=args.dm_quartet_seed if args.dm_quartet_seed is not None else args.seed,
-            )
-            quartet_dist_test = get_quartet_dist(dm_quartets, dm_ref_quartets).item()
-            metrics["quartet_dist_test"] = quartet_dist_test
-
-        results = {
+    with open(os.path.join(out_dir, "results.json"), "r+") as f:
+        data = json.load(f)
+        data.update({
             "run_name": run_name,
             "dataset": args.dataset,
             "lineage": args.lineage,
             "setting": args.setting,
             "uid": uid,
-            "metrics": metrics,
-        }
-        with open(os.path.join(out_dir, "results.json"), "w") as f:
-            json.dump(results, f, indent=2)
-        logging.info(f"Saved results.json with metrics: {results['metrics']}")
+        })
+        f.seek(0)
+        json.dump(data, f, indent=2)
+        f.truncate()
+
+    # Persist full CLI args for reproducibility
+    try:
+        args_dict = dict(vars(args))
+        # Ensure JSON-serializable: stringify or reduce problematic fields
+        func_obj = args_dict.pop("func", None)
+        if func_obj is not None:
+            args_dict["func"] = getattr(func_obj, "__name__", str(func_obj))
+        with open(os.path.join(out_dir, "args_or_config.json"), "w") as fa:
+            json.dump(args_dict, fa, indent=2, default=str)
+    except Exception as e:
+        logging.warning(f"Failed to write args_or_config.json: {e}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -468,6 +230,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Tree level for high_level_partition setting (higher = more known quartets)",
+    )
+    t.add_argument(
+        "--known-quartets-cap",
+        type=int,
+        default=500000,
+        help="Cap for known quartets generation in HLP; <=0 means full enumeration",
     )
     t.add_argument(
         "--known-fraction",

@@ -85,6 +85,96 @@ celltreeqm train \
   --recon-method nj
 ```
 
+#### CLI flags reference
+- `--steps-per-epoch`: number of training steps per epoch (default: 300)
+- `--eval-interval`: evaluate train RF every N steps (default: 50)
+- `--eval-quartets-cap`: cap quartets at eval time; <=0 means all (default: 100000)
+- `--dm-quartet-seed`: seed for quartet sampling during training/eval; defaults to `--seed`
+- `--recon-method`: `nj|upgma|ward|single` (default: `nj`)
+- `--prior-level`: HLP tree level for known quartets (default: 2)
+- `--known-quartets-cap`: HLP cap for known quartets generation; <=0 for full (default: 500000)
+- `--known-fraction`: PLL fraction of known leaves (default: 0.5)
+
+#### Examples (small/mid/large × supervised/HLP/PLL)
+
+Small - supervised
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_small --lineage P0 --setting fully_supervised \
+  --epochs 3 --quartets 2048 --steps-per-epoch 300 --eval-interval 50 \
+  --eval-quartets-cap 100000 --device cuda:0 --recon-method nj
+```
+
+Small - HLP
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_small --lineage P0 --setting high_level_partition \
+  --prior-level 2 --known-quartets-cap 200000 \
+  --epochs 3 --quartets 2048 --steps-per-epoch 300 --eval-interval 50 \
+  --eval-quartets-cap 100000 --device cuda:0
+```
+
+Small - PLL
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_small --lineage P0 --setting partially_labeled_leaves \
+  --known-fraction 0.5 \
+  --epochs 3 --quartets 2048 --steps-per-epoch 300 --eval-interval 50 \
+  --eval-quartets-cap 100000 --device cuda:0
+```
+
+Mid - supervised
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_mid --lineage P0 --setting fully_supervised \
+  --epochs 5 --quartets 4096 --steps-per-epoch 400 --eval-interval 50 \
+  --eval-quartets-cap 100000 --device cuda:0
+```
+
+Mid - HLP
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_mid --lineage P0 --setting high_level_partition \
+  --prior-level 2 --known-quartets-cap 300000 \
+  --epochs 5 --quartets 4096 --steps-per-epoch 400 --eval-interval 50 \
+  --eval-quartets-cap 100000 --device cuda:0
+```
+
+Mid - PLL
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_mid --lineage P0 --setting partially_labeled_leaves \
+  --known-fraction 0.5 \
+  --epochs 5 --quartets 4096 --steps-per-epoch 400 --eval-interval 50 \
+  --eval-quartets-cap 100000 --device cuda:0
+```
+
+Large - supervised
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_large --lineage P0 --setting fully_supervised \
+  --epochs 8 --quartets 8192 --steps-per-epoch 500 --eval-interval 100 \
+  --eval-quartets-cap 50000 --device cuda:0
+```
+
+Large - HLP
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_large --lineage P0 --setting high_level_partition \
+  --prior-level 2 --known-quartets-cap 500000 \
+  --epochs 8 --quartets 8192 --steps-per-epoch 500 --eval-interval 100 \
+  --eval-quartets-cap 50000 --device cuda:0
+```
+
+Large - PLL
+```bash
+celltreeqm train --bench-root /workspaces/CellTreeQM/CellTreeBench \
+  --dataset celegans_large --lineage P0 --setting partially_labeled_leaves \
+  --known-fraction 0.5 \
+  --epochs 8 --quartets 8192 --steps-per-epoch 500 --eval-interval 100 \
+  --eval-quartets-cap 50000 --device cuda:0
+```
+
 Training artifacts and dataset-level reusable artifacts are saved to distinct locations:
 
 - Experiment outputs (models, results):
@@ -101,6 +191,39 @@ Key files:
 ---
 
 ### 🐍 Python API
+### ✅ Best checkpointing
+
+The trainer saves a best checkpoint to `best_model.pth` based on the setting:
+- fully_supervised / partially_labeled_leaves: tracked by test RF (lower is better)
+- high_level_partition: tracked by train RF (lower is better)
+
+At least one checkpoint is guaranteed at the end of training.
+
+### 🧪 Testing
+
+Make sure `celltreeqm` and `celltreebench` are importable. Then run:
+
+```bash
+# Library-only smoke
+pytest -q -m library
+
+# CLI end-to-end smoke
+pytest -q -m e2e
+
+# Both
+pytest -q -m "library or e2e"
+```
+
+### Recommended parameters per dataset size
+
+- Small (fast iteration):
+  - fully_supervised / HLP / PLL: epochs=3, quartets=2048, steps-per-epoch=300, eval-interval=50, eval-quartets-cap=100000
+- Mid:
+  - epochs=5, quartets=4096, steps-per-epoch=400, eval-interval=50, eval-quartets-cap=100000
+- Large:
+  - epochs=8, quartets=8192, steps-per-epoch=500, eval-interval=100, eval-quartets-cap=50000
+
+For HLP use `--prior-level 2`; for PLL use `--known-fraction 0.5`.
 
 ```python
 import torch

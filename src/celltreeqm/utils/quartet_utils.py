@@ -227,6 +227,106 @@ def generate_quartets_from_level(tree, level, clade_relations="known"):
     return total_quartets
 
 
+def generate_quartets_from_level_sampled(tree, level, cap, seed=123):
+    """
+    Sample a bounded number of "known" quartets at a given tree level without
+    enumerating all possibilities. Returns a dict {(i,j,k,l)->code} with up to cap items.
+
+    Strategy:
+      - Collect clades at the given level and their leaf index lists
+      - Randomly sample quartets across patterns:
+        * 2+2: pick two clades, then 2 leaves from each
+        * 1+1+1+1: pick four distinct clades, one leaf each; compute code by root distances
+        * 2+1+1: pick three clades; from one clade sample 2 leaves, from the others 1 each
+      - Use a set to avoid duplicates; stop when cap is reached or attempts exhausted
+    """
+    import numpy as np
+    rng = np.random.default_rng(seed)
+
+    leaf_names = [leaf.name for leaf in tree.get_leaves()]
+    n_leaves = len(leaf_names)
+    name_to_idx = {nm: i for i, nm in enumerate(leaf_names)}
+
+    clade_roots = _collect_clades_at_level(tree, level)
+    clade_info = _get_clade_list_and_roots(clade_roots, name_to_idx)
+    n_clades = len(clade_info)
+    if n_clades < 2:
+        return {}
+
+    # Precompute clade root distance matrix for 1+1+1+1 code computation
+    clade_dist = _compute_clade_distance_by_root(clade_info) if n_clades >= 4 else None
+
+    result = {}
+    attempts = 0
+    max_attempts = max(20000, cap * 50)
+
+    def _code_for_indices(a, b, c, d):
+        # compute code by leaf distances (4-point)
+        S1 = tree.get_distance(leaf_names[a], leaf_names[b]) + tree.get_distance(leaf_names[c], leaf_names[d])
+        S2 = tree.get_distance(leaf_names[a], leaf_names[c]) + tree.get_distance(leaf_names[b], leaf_names[d])
+        S3 = tree.get_distance(leaf_names[a], leaf_names[d]) + tree.get_distance(leaf_names[b], leaf_names[c])
+        sums = [S1, S2, S3]
+        return sums.index(min(sums))
+
+    while len(result) < cap and attempts < max_attempts:
+        attempts += 1
+        if n_clades >= 4 and rng.random() < 0.3:
+            # 1+1+1+1
+            cids = rng.choice(n_clades, size=4, replace=False)
+            sel = []
+            for cid in cids:
+                leaves, _ = clade_info[cid]
+                if len(leaves) == 0:
+                    sel = []
+                    break
+                sel.append(rng.choice(leaves))
+            if len(sel) != 4:
+                continue
+            i, j, k, l = sorted(sel)
+            key = (i, j, k, l)
+            code = _code_for_indices(i, j, k, l)
+            result[key] = code
+        elif n_clades >= 3 and rng.random() < 0.5:
+            # 2+1+1
+            cids = rng.choice(n_clades, size=3, replace=False)
+            # choose which clade yields the pair
+            pair_idx = rng.integers(0, 3)
+            leaves_pair, _ = clade_info[cids[pair_idx]]
+            if len(leaves_pair) < 2:
+                continue
+            pair = rng.choice(leaves_pair, size=2, replace=False)
+            ones = []
+            for idx, cid in enumerate(cids):
+                if idx == pair_idx:
+                    continue
+                leaves1, _ = clade_info[cid]
+                if len(leaves1) == 0:
+                    ones = []
+                    break
+                ones.append(rng.choice(leaves1))
+            if len(ones) != 2:
+                continue
+            sel = sorted([pair[0], pair[1], ones[0], ones[1]])
+            key = tuple(sel)
+            code = _code_for_indices(*sel)
+            result[key] = code
+        else:
+            # 2+2
+            c1, c2 = rng.choice(n_clades, size=2, replace=False)
+            leaves1, _ = clade_info[c1]
+            leaves2, _ = clade_info[c2]
+            if len(leaves1) < 2 or len(leaves2) < 2:
+                continue
+            i, j = rng.choice(leaves1, size=2, replace=False)
+            k, l = rng.choice(leaves2, size=2, replace=False)
+            sel = sorted([int(i), int(j), int(k), int(l)])
+            key = tuple(sel)
+            code = 0  # by construction corresponds to (i,j)-(k,l)
+            result[key] = code
+
+    return result
+
+
 def _collect_clades_at_level(root_node, target_level=1, current_level=0):
     """Collect clade roots at specified level."""
     clade_roots = []

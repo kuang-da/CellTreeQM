@@ -1,0 +1,59 @@
+name: tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CellTreeQM
+        uses: actions/checkout@v4
+        with:
+          path: CellTreeQM
+      - name: Checkout CellTreeBench
+        uses: actions/checkout@v4
+        with:
+          repository: kuang-da/CellTreeBench
+          path: CellTreeBench
+          fetch-depth: 1
+          # Optional: narrow the checkout to speed up (requires repo support)
+          # sparse-checkout: |
+          #   data/celegans_small
+          #   src
+          # sparse-checkout-cone: true
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libgl1 curl
+      - name: Download minimal dataset (required)
+        run: |
+          set -euo pipefail
+          mkdir -p CellTreeBench/data
+          URL="https://github.com/kuang-da/CellTreeBench/releases/download/mini-celegans-small-1/celegans_small_mini.tgz"
+          echo "Downloading minimal dataset from ${URL}"
+          curl -L "$URL" -o mini.tgz
+          tar -xzf mini.tgz -C CellTreeBench/data
+          ls -la CellTreeBench/data
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ./CellTreeBench
+          pip install -e ./CellTreeQM
+          pip install pytest
+      - name: Run library tests
+        env:
+          PYTHONUNBUFFERED: "1"
+        working-directory: ./CellTreeQM
+        run: pytest -q -m library
+      - name: Run CLI tests
+        env:
+          PYTHONUNBUFFERED: "1"
+          CELLTREEQM_OUTPUT_DIR: ${{ github.workspace }}/artifacts/celltreeqm
+        working-directory: ./CellTreeQM
+        run: pytest -q -m e2e
